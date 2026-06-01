@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8s-healer
+  namespace: k8s-healer
+  labels:
+    app: k8s-healer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: k8s-healer
+  template:
+    metadata:
+      labels:
+        app: k8s-healer
+    spec:
+      serviceAccountName: k8s-healer
+      containers:
+        - name: agent
+          image: prashantmurtale/k8s-healer:latest
+          env:
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ai-config
+                  key: GEMINI_API_KEY
+            - name: DRY_RUN
+              value: "false"
+            - name: EXCLUDED_NAMESPACES
+              value: "kube-system,kube-public,k8s-healer"
+            - name: COOLDOWN_SECONDS
+              value: "300"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
