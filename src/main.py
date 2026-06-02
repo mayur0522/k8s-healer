@@ -55,11 +55,19 @@ class K8sHealerController:
         
         self.dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
         
+        # ArgoCD-safe mode: disable healers that patch deployments (prevents GitOps drift)
+        self.argocd_safe_mode = os.getenv("ARGOCD_SAFE_MODE", "true").lower() == "true"
+        
+        # Token budget: limit AI API calls per hour to control costs
+        self.max_ai_calls_per_hour = int(os.getenv("MAX_AI_CALLS_PER_HOUR", "30"))
+        self.ai_calls_this_hour: list = []  # timestamps of AI calls
+        self.total_ai_calls = 0
+        
         # State tracking
         self.action_cooldowns: Dict[str, datetime] = {}
         self.cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", "300"))
         
-        logger.info(f"K8sHealer initialized (dry_run={self.dry_run})")
+        logger.info(f"K8sHealer initialized (dry_run={self.dry_run}, argocd_safe={self.argocd_safe_mode}, max_ai_calls/hr={self.max_ai_calls_per_hour})")
     
     async def run(self):
         """Main run loop."""
@@ -69,7 +77,8 @@ class K8sHealerController:
         await asyncio.gather(
             self.watch_pods(),
             self.watch_events(),
-            self.periodic_health_check()
+            self.periodic_health_check(),
+            self.log_token_usage()
         )
     
     async def watch_pods(self):
@@ -162,6 +171,35 @@ class K8sHealerController:
             if issue:
                 await self.handle_issue(issue, k8s_event)
     
+    def _check_ai_budget(self) -> bool:
+        """Check if we're within the AI API call budget for this hour."""
+        now = datetime.now()
+        # Remove calls older than 1 hour
+        self.ai_calls_this_hour = [
+            t for t in self.ai_calls_this_hour
+            if (now - t).total_seconds() < 3600
+        ]
+        
+        if len(self.ai_calls_this_hour) >= self.max_ai_calls_per_hour:
+            logger.warning(
+                f"💰 AI budget limit reached: {len(self.ai_calls_this_hour)}/{self.max_ai_calls_per_hour} calls this hour. "
+                f"Skipping AI analysis to control costs."
+            )
+            return False
+        return True
+    
+    async def log_token_usage(self):
+        """Periodically log AI token usage stats for cost monitoring."""
+        while True:
+            await asyncio.sleep(3600)  # Every hour
+            calls_this_hour = len(self.ai_calls_this_hour)
+            logger.info(
+                f"💰 TOKEN USAGE REPORT: "
+                f"AI calls this hour: {calls_this_hour}/{self.max_ai_calls_per_hour} | "
+                f"Total AI calls since start: {self.total_ai_calls} | "
+                f"Est. tokens used this hour: ~{calls_this_hour * 600}"
+            )
+    
     async def handle_issue(self, issue: dict, resource: Any):
         """Handle a detected issue."""
         issue_key = f"{issue['type']}:{issue.get('resource_name', 'unknown')}"
@@ -175,10 +213,15 @@ class K8sHealerController:
         
         logger.warning(f"🔍 Issue detected: {issue['type']} - {issue.get('message', '')}")
         
-        # Get AI analysis if enabled
-        if os.getenv("GEMINI_API_KEY"):
+        # Get AI analysis if enabled AND within budget
+        if os.getenv("AZURE_OPENAI_API_KEY") and self._check_ai_budget():
             analysis = await self.ai_analyzer.analyze_issue(issue, resource)
-            logger.info(f"🤖 AI Analysis: {analysis.get('summary', 'N/A')}")
+            self.ai_calls_this_hour.append(datetime.now())
+            self.total_ai_calls += 1
+            logger.info(
+                f"🤖 AI Analysis: {analysis.get('summary', 'N/A')} "
+                f"[calls this hour: {len(self.ai_calls_this_hour)}/{self.max_ai_calls_per_hour}]"
+            )
         
         # Execute healing action
         if not self.dry_run:
@@ -193,8 +236,22 @@ class K8sHealerController:
             logger.info(f"🔸 DRY RUN: Would heal {issue_key}")
     
     async def execute_healing(self, issue: dict, resource: Any) -> bool:
-        """Execute a healing action based on issue type."""
+        """Execute a healing action based on issue type.
+        
+        In ArgoCD-safe mode, only pod-level actions (restarts) are allowed.
+        Deployment-level patches (memory increase, rollback) are BLOCKED
+        to prevent GitOps drift.
+        """
         issue_type = issue['type']
+        
+        # ArgoCD-safe mode: block healers that patch Deployments
+        if self.argocd_safe_mode and issue_type in ('OOMKilled',):
+            logger.warning(
+                f"⚠️ ARGOCD_SAFE_MODE: Skipping {issue_type} healer for {issue.get('resource_name')} — "
+                f"this would patch the Deployment and cause ArgoCD drift. "
+                f"Set ARGOCD_SAFE_MODE=false to allow deployment patches."
+            )
+            return False
         
         healers = {
             'CrashLoopBackOff': self.pod_healer.heal_crash_loop,

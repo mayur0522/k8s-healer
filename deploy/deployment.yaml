@@ -18,17 +18,28 @@ spec:
       serviceAccountName: k8s-healer
       containers:
         - name: agent
-          image: prashantmurtale/k8s-healer:latest
+          image: ghcr.io/mayur0522/k8s-healer:latest
           env:
-            - name: GEMINI_API_KEY
+            - name: AZURE_OPENAI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: ai-config
-                  key: GEMINI_API_KEY
+                  key: AZURE_OPENAI_API_KEY
+            - name: AZURE_OPENAI_ENDPOINT
+              valueFrom:
+                secretKeyRef:
+                  name: ai-config
+                  key: AZURE_OPENAI_ENDPOINT
+            - name: AZURE_DEPLOYMENT_NAME
+              value: "gpt-4o"
             - name: DRY_RUN
-              value: "false"
+              value: "true"
+            - name: ARGOCD_SAFE_MODE
+              value: "true"
+            - name: MAX_AI_CALLS_PER_HOUR
+              value: "30"
             - name: EXCLUDED_NAMESPACES
-              value: "kube-system,kube-public,k8s-healer"
+              value: "kube-system,kube-public,k8s-healer,argocd,cert-manager,vault,flux-system,ingress-nginx,keda,external-secrets"
             - name: COOLDOWN_SECONDS
               value: "300"
           resources:

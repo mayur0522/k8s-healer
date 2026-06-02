@@ -1,5 +1,5 @@
 """
-AI Analyzer - Uses AI for root cause analysis.
+AI Analyzer - Uses Azure OpenAI for root cause analysis.
 """
 
 import os
@@ -7,26 +7,33 @@ import json
 import logging
 from typing import Dict, Any
 
-import google.generativeai as genai
+from openai import AzureOpenAI
 
 logger = logging.getLogger(__name__)
 
-# Initialize Gemini
-api_key = os.getenv("GEMINI_API_KEY")
-if api_key:
-    genai.configure(api_key=api_key)
+# Initialize Azure OpenAI
+api_key = os.getenv("AZURE_OPENAI_API_KEY")
+endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+deployment = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o")
 
 
 class AIAnalyzer:
-    """AI-powered issue analysis."""
+    """AI-powered issue analysis using Azure OpenAI."""
     
     def __init__(self):
-        if api_key:
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
+        if api_key and endpoint:
+            self.client = AzureOpenAI(
+                api_key=api_key,
+                api_version="2024-02-15-preview",
+                azure_endpoint=endpoint,
+            )
+            self.deployment = deployment
             self.enabled = True
+            logger.info(f"AI analysis enabled (deployment={self.deployment})")
         else:
+            self.client = None
             self.enabled = False
-            logger.warning("AI analysis disabled - no GEMINI_API_KEY")
+            logger.warning("AI analysis disabled - no AZURE_OPENAI_API_KEY or AZURE_OPENAI_ENDPOINT")
     
     async def analyze_issue(self, issue: Dict[str, Any], resource: Any) -> Dict[str, Any]:
         """
@@ -41,15 +48,23 @@ class AIAnalyzer:
         try:
             prompt = self._build_prompt(issue, resource)
             
-            response = self.model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,
-                    max_output_tokens=500,
-                )
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a Kubernetes SRE expert. Analyze issues and respond ONLY with valid JSON."
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.2,
+                max_tokens=500,
             )
             
-            return self._parse_response(response.text)
+            return self._parse_response(response.choices[0].message.content)
             
         except Exception as e:
             logger.error(f"AI analysis failed: {e}")
@@ -57,7 +72,7 @@ class AIAnalyzer:
     
     def _build_prompt(self, issue: Dict[str, Any], resource: Any) -> str:
         """Build the analysis prompt."""
-        return f"""You are a Kubernetes SRE expert. Analyze this issue and provide a brief assessment.
+        return f"""Analyze this Kubernetes issue and provide a brief assessment.
 
 ISSUE:
 - Type: {issue.get('type')}

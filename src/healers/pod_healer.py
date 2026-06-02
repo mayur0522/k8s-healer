@@ -2,6 +2,8 @@
 Pod Healer - Remediation actions for pod issues.
 """
 
+import os
+
 import logging
 from typing import Dict, Any
 from datetime import datetime, timezone
@@ -52,17 +54,30 @@ class PodHealer:
         
         Strategy:
         1. First, try restarting the pod
-        2. If restarts > 10, rollback deployment
+        2. If restarts > 10, rollback deployment (only if ARGOCD_SAFE_MODE is off)
         """
         pod_name = issue['resource_name']
         namespace = issue['namespace']
         restart_count = issue.get('restart_count', 0)
+        argocd_safe = os.getenv("ARGOCD_SAFE_MODE", "true").lower() == "true"
         
         try:
-            if restart_count >= 10:
-                # Try to rollback the deployment
+            if restart_count >= 10 and not argocd_safe:
+                # Try to rollback the deployment (only when ArgoCD safe mode is OFF)
                 logger.warning(f"High restart count, attempting rollback for {pod_name}")
                 return await self._rollback_owner_deployment(pod_name, namespace)
+            elif restart_count >= 10 and argocd_safe:
+                # In ArgoCD-safe mode, just restart and warn
+                logger.warning(
+                    f"⚠️ ARGOCD_SAFE_MODE: Pod {pod_name} has {restart_count} restarts. "
+                    f"Rollback blocked to prevent GitOps drift. "
+                    f"Fix the root cause in Git and let ArgoCD sync."
+                )
+                self.core_v1.delete_namespaced_pod(
+                    name=pod_name,
+                    namespace=namespace
+                )
+                return True
             else:
                 # Just restart the pod
                 logger.info(f"Restarting pod {pod_name} in {namespace}")
